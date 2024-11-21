@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class Patches(nn.Module):
     def __init__(self, patch_size):
@@ -13,60 +14,71 @@ class Patches(nn.Module):
         patches = patches.contiguous().view(batch_size, -1, self.patch_size * self.patch_size * spectrograms.size(1))
         return patches
 
+
 class MLPBlock(nn.Module):
-    '''
-    num_patches, hidden_dim = S, C
-    '''
     def __init__(self, num_patches, hidden_dim, token_mixing_dim, channel_mixing_dim):
         super(MLPBlock, self).__init__()
-        self.layer_norm1 = nn.LayerNorm(hidden_dim)
-        self.layer_norm2 = nn.LayerNorm(hidden_dim)
-        self.gelu = nn.GELU()
         
-        self.W1 = nn.Linear(num_patches, token_mixing_dim)
-        self.W2 = nn.Linear(token_mixing_dim, num_patches)
-        self.W3 = nn.Linear(hidden_dim, channel_mixing_dim)
-        self.W4 = nn.Linear(channel_mixing_dim, hidden_dim)
+        # Token Mixing: Apply a transformation along the patch dimension
+        self.token_mixing = nn.Sequential(
+            nn.LayerNorm(hidden_dim),  # Normalize across the channel dimension
+            nn.Linear(num_patches, token_mixing_dim),
+            nn.GELU(),
+            nn.Linear(token_mixing_dim, num_patches)
+        )
         
-    def forward(self, X):                                           # X shape: (batch_size, num_patches, hidden_dim)
-        # Token Mixing
-        X_T = self.layer_norm1(X).transpose(1, 2)                   # (batch_size, hidden_dim, num_patches)
-        U = self.W2(self.gelu(self.W1(X_T))).transpose(1, 2) + X    # Skip connection & (batch_size, num_patches, hidden_dim)
+        # Channel Mixing: Apply a transformation along the channel dimension
+        self.channel_mixing = nn.Sequential(
+            nn.LayerNorm(hidden_dim),  # Normalize across the channel dimension
+            nn.Linear(hidden_dim, channel_mixing_dim),
+            nn.GELU(),
+            nn.Linear(channel_mixing_dim, hidden_dim)
+        )
 
-        # Channel Mixing
-        Y = self.W4(self.gelu(self.W3(self.layer_norm2(U)))) + U    # Skip connection & (batch_size, num_patches, hidden_dim)
-        return Y                                                    # (batch_size, num_patches, hidden_dim)
+    def forward(self, X):
+        # X shape: (batch_size, num_patches, hidden_dim)
+        
+        # Token Mixing: Transpose and apply the mixing along the patch dimension
+        X_T = X.transpose(1, 2)  # (batch_size, hidden_dim, num_patches)
+        X_T = self.token_mixing(X_T)
+        X_prime = X_T.transpose(1, 2)  # Transpose back to (batch_size, num_patches, hidden_dim)
+        U = X + X_prime  # Add skip connection
+        
+        # Channel Mixing: Apply mixing along the channel dimension
+        X_C = self.channel_mixing(U)
+        Y = U + X_C  # Add skip connection
+        
+        return Y
 
 
 class MLPMixer(nn.Module):
     def __init__(self, patch_size, num_patches, hidden_dim, token_mixing_dim, channel_mixing_dim, num_of_mlp_blocks, freq_bins, time_frames, num_classes):
         super(MLPMixer, self).__init__()
         self.projection = nn.Linear(patch_size * patch_size, hidden_dim)
-        self.mlp_blocks = nn.ModuleList(
-            [MLPBlock(num_patches, 
-                      hidden_dim, 
-                      token_mixing_dim, 
-                      channel_mixing_dim) for _ in range(num_of_mlp_blocks)]
-            )
+        self.mlp_blocks = nn.ModuleList([MLPBlock(num_patches, hidden_dim, token_mixing_dim, channel_mixing_dim) for _ in range(num_of_mlp_blocks)])
 
         self.data_augmentation = nn.Sequential(
             nn.Dropout(0.1),
         )
 
         self.classification_layer = nn.Sequential(
-            nn.LayerNorm(hidden_dim),           # Layer normalization
-            nn.Dropout(0.2),                    # Dropout
-            nn.Linear(hidden_dim, num_classes), # Fully connected layer to map to number of classes
-            nn.Softmax(dim=1)                   # Softmax to output class probabilities
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, num_classes)
         )
+        
         self.patches = Patches(patch_size)
 
     def forward(self, spectrograms):
         batch_size = spectrograms.size(0)
 
-        augmented_spectrograms = self.data_augmentation(spectrograms) # Data augmentation
-        X = self.patches(augmented_spectrograms) # Extract patches from spectrograms
-        X = self.projection(X) # Per-patch Fully-connected
+        # Data augmentation
+        augmented_spectrograms = self.data_augmentation(spectrograms)
+
+        # Extract patches from spectrograms
+        X = self.patches(augmented_spectrograms)
+
+        # Per-patch Fully-connected
+        X = self.projection(X)
 
         # MLP Blocks
         for block in self.mlp_blocks:
