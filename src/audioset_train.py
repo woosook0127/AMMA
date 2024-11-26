@@ -15,6 +15,7 @@ from MLPMixer_audio import MLPMixer  # MLP-Mixer for Audio model
 from tqdm import tqdm
 import warnings
 import pdb
+import time 
 # librosa의 FutureWarning 억제
 warnings.filterwarnings("ignore", category=FutureWarning, module="librosa")
 
@@ -30,6 +31,8 @@ STFT_init = {
 }
 
 def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
+    st = time.perf_counter()
+
     decay = []
     no_decay = []
     for name, param in model.named_parameters():
@@ -39,32 +42,39 @@ def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
             no_decay.append(param)
         else:
             decay.append(param)
+    # print(f"############ Add weight decay time: {(time.perf_counter() - st):.3f}")
+
     return [
         {'params': no_decay, 'weight_decay': 0.},
         {'params': decay, 'weight_decay': weight_decay}]
 
-
-
 def load_metadata(json_path):
+    st = time.perf_counter()
+
     with open(json_path, 'r') as f:
         metadata = json.load(f)
+    # print(f"############ Load Metadata time: {(time.perf_counter() - st):.3f}")
+
     return list(metadata.values())
 
 def load_label_map(csv_path):
+    st = time.perf_counter()
     df = pd.read_csv(csv_path)
     label_map = {row['mid']: row['index'] for _, row in df.iterrows()}
+    # print(f"############ Load Lable Map time: {(time.perf_counter() - st):.3f}")
+
     return label_map
 
 # 데이터셋 클래스
 class AudioDataset(torch.utils.data.Dataset):
     def __init__(self, metadata, data_folder, label_map, transform=None):
         problematic_files = [
-            "wavs/balanced_train/000002/id_cHfPCPrffSQ.m4a",
-            "wavs/unbalanced_train/000076/id_5ym3QWL2bRM.m4a",
-            "wavs/unbalanced_train/000130/id_CmgWyoNh_LU.m4a",
-            "wavs/unbalanced_train/000182/id_Klq-we49OVU.m4a",
-            "wavs/unbalanced_train/000321/id_iMMwB0h3v20.m4a",
-            "wavs/unbalanced_train/000390/id_wMjEr9oDnJk.m4a",
+            "wavs_resampled/balanced_train/000002/id_cHfPCPrffSQ.wav",
+            "wavs_resampled/unbalanced_train/000076/id_5ym3QWL2bRM.wav",
+            "wavs_resampled/unbalanced_train/000130/id_CmgWyoNh_LU.wav",
+            "wavs_resampled/unbalanced_train/000182/id_Klq-we49OVU.wav",
+            "wavs_resampled/unbalanced_train/000321/id_iMMwB0h3v20.wav",
+            "wavs_resampled/unbalanced_train/000390/id_wMjEr9oDnJk.wav",
         ]
         self.metadata = metadata
         self.metadata = [m for m in metadata if m['path'] not in problematic_files ]
@@ -81,26 +91,45 @@ class AudioDataset(torch.utils.data.Dataset):
         tags = item["tags"]
         
         # Convert tags to multi-hot vector
+        st = time.perf_counter()
         label_tensor = torch.zeros(len(self.label_map))
         for tag in tags:
             if tag in self.label_map:
                 label_tensor[self.label_map[tag]] = 1
+        # print(f"##GET ITEM## Tag to Multi-hot vec: {(time.perf_counter() - st):.3f}, label_tensor: {label_tensor.shape}")
 
         # Load audio with librosa and convert to Tensor
-        y, sr = librosa.load(audio_path, sr=16000, mono=True)  # Load the file at 16 kHz
-        y = np.pad(y, (0, max(0, 16000*10 - len(y))), mode='constant')[:16000*10]
+        st = time.perf_counter()
+        y, sr = torchaudio.load(audio_path)  # Load the audio
+        # Convert to mono 
+        if y.ndim > 1:  # Check for multiple channels
+            y = y[0, :].squeeze(0)
+        # print(f"##GET ITEM## load audio: {(time.perf_counter() - st):.3f}")        
 
-        spectrogram = librosa.feature.melspectrogram(y=y, sr=STFT_init['sr'], n_fft=STFT_init['nfft'], hop_length=STFT_init['nShift'], n_mels=STFT_init['n_mels'])
+        # Pad or truncate to 10 seconds (16000 * 10 samples)
+        st = time.perf_counter()
+        num_samples = STFT_init['sr'] * 10
+        if len(y) < num_samples:
+            padding = num_samples -len(y)
+            y = torch.nn.functional.pad(y, (0, padding), mode='constant')
+        else:
+            y = y[:num_samples]
+        # print(f"##GET ITEM## padding time: {(time.perf_counter() - st):.3f}")
+
+        # Compute MelSpectrogram
+        st = time.perf_counter()
+        mel_spec = self.transform(y)
         # Convert to log scale
-        log_mel_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
-        spec_tensor = torch.tensor(log_mel_spectrogram) # Convert spectrogram to tensor
-        spec_tensor = spec_tensor.unsqueeze(0)  # channel dimension (since it's mono, channel=1) -> Shape: (1, 1, n_mels, time_frames) (batch channel is automatically added)
-        spec_tensor = spec_tensor.float() # Ensure it's a FloatTensor (for compatibility with PyTorch model)
-    
+        log_mel_spec = T.AmplitudeToDB()(mel_spec)
+        spec_tensor = log_mel_spec.unsqueeze(0).float()  # Add batch dimension for consistency
+        # print(f"##GET ITEM## convert log mel scale: {(time.perf_counter() - st):.3f}, spec_tensor: {spec_tensor.shape}")
+
         # Padding
+        st = time.perf_counter()
         h_pad = (16 - spec_tensor.shape[1] % 16) % 16
         w_pad = (16 - spec_tensor.shape[2] % 16) % 16
         spec_tensor = F.pad(spec_tensor, (0, w_pad, 0, h_pad), mode='constant', value=0)
+        # print(f"##GET ITEM## spec padding time: {(time.perf_counter() - st):.3f}")
 
         return spec_tensor, label_tensor
 
@@ -138,7 +167,7 @@ from tensorboardX import SummaryWriter
 
 '''For AudioSet'''
 if __name__ == "__main__":
-    dset_root = "/home/nas3/DB/Audioset/Fast-Audioset-Download/"
+    dset_root = "/home/nas3/DB/Audioset/Audioset_16k_wav/"
     # Paths
     balanced_train_json =   dset_root + "audioset_balanced_train_metadata.json"
     unbalanced_train_json = dset_root + "audioset_unbalanced_train_metadata.json"
@@ -150,7 +179,7 @@ if __name__ == "__main__":
     writer = SummaryWriter(log_dir)
 
     # Device 설정
-    gpu = "cuda:0"
+    gpu = "cuda:1"
     device = torch.device(gpu if torch.cuda.is_available() else "cpu")
 
     # Load label map
@@ -178,10 +207,10 @@ if __name__ == "__main__":
     
     # 데이터 변환
     transform = T.MelSpectrogram(
-        sample_rate=16000, 
-        n_fft=1024,            # FFT size (controls n_freqs)
-        hop_length=512,        # Hop size for STFT
-        n_mels=freq_bins       # Number of mel filters
+        sample_rate =STFT_init['sr'],
+        n_fft       =STFT_init['nfft'],
+        hop_length  =STFT_init['nShift'],
+        n_mels      =STFT_init['n_mels']
     )
 
     # Dataset and DataLoader
@@ -208,7 +237,8 @@ if __name__ == "__main__":
     ).to(device)
     
     # 손실 함수 및 옵티마이저
-    criterion = nn.CrossEntropyLoss()
+    # criterion = nn.CrossEntropyLoss()
+    criterion = nn.BCELoss()
     # optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     weight_decay = 0.05
     param_groups = add_weight_decay(model, weight_decay)
