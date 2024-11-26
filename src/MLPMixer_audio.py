@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torchaudio.transforms as T
 import pdb
+import time 
 
 class Patches(nn.Module):
     def __init__(self, patch_size):
@@ -9,11 +10,13 @@ class Patches(nn.Module):
         self.patch_size = patch_size
 
     def forward(self, spectrograms):
+        st = time.perf_counter()
         batch_size = spectrograms.size(0)
         # Extract patches using unfold for spectrograms
 
         patches = spectrograms.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
         patches = patches.contiguous().view(batch_size, -1, self.patch_size * self.patch_size * spectrograms.size(1))
+        # print(f"Patches forward time: {(time.perf_counter() - st):.3f}")
         return patches
 
 class MLPBlock(nn.Module):
@@ -39,6 +42,8 @@ class MLPBlock(nn.Module):
         self.cross_attention = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=4)
         
     def forward(self, X):                                           # X shape: (batch_size, num_patches, hidden_dim)
+        st = time.perf_counter()
+
         # Token Mixing
         X_T = self.layer_norm1(X).transpose(1, 2)                   # (batch_size, hidden_dim, num_patches)
 
@@ -50,6 +55,8 @@ class MLPBlock(nn.Module):
         
         # Channel Mixing
         Y = self.W4(self.gelu(self.W3(self.layer_norm2(U)))) + U    # Skip connection & (batch_size, num_patches, hidden_dim)
+        # print(f"MLP Block forward time: {(time.perf_counter() - st):.3f}")
+
         return Y                                                    # (batch_size, num_patches, hidden_dim)
 
 
@@ -75,11 +82,12 @@ class MLPMixer(nn.Module):
             nn.LayerNorm(hidden_dim),               # Layer normalization
             nn.Dropout(0.2),                        # Dropout
             nn.Linear(hidden_dim, num_classes),     # Fully connected layer to map to number of classes
-            # nn.Softmax(dim=1)                     # Softmax to output class probabilities # Softmax는 모델 밖에서 하는게 관례적
+            nn.Softmax(dim=1)                     # Softmax to output class probabilities # Softmax는 모델 밖에서 하는게 관례적
         )
         self.patches = Patches(patch_size)
 
     def forward(self, spectrograms):
+        st = time.perf_counter()
         batch_size = spectrograms.size(0)
         
         augmented_spectrograms = self.data_augmentation(spectrograms) # Data augmentation
@@ -95,7 +103,7 @@ class MLPMixer(nn.Module):
 
         # Classification layer
         out = self.classification_layer(X)
-
+        # print(f"MLP Mixer forward time: {(time.perf_counter() - st):.3f}")
         return out
 
 
