@@ -47,6 +47,12 @@ class MLPBlock(nn.Module):
         # Token Mixing
         X_T = self.layer_norm1(X).transpose(1, 2)                   # (batch_size, hidden_dim, num_patches)
 
+        print(f"X : {X.shape}")
+        print(f"X_T : {X_T.shape}")
+        print(f"self.W1(X_T) : {self.W1(X_T).shape}")
+        print(f"self.gelu(self.W1(X_T)) : {self.gelu(self.W1(X_T)).shape}")
+        print(f"self.W2(self.gelu(self.W1(X_T))) : {self.W2(self.gelu(self.W1(X_T))).shape}")
+
         U = self.W2(self.gelu(self.W1(X_T))).transpose(1, 2) + X    # Skip connection & (batch_size, num_patches, hidden_dim)
 
         # # Cross-Attention 추가
@@ -80,9 +86,9 @@ class MLPMixer(nn.Module):
 
         self.classification_layer = nn.Sequential(
             nn.LayerNorm(hidden_dim),               # Layer normalization
-            nn.Dropout(0.2),                        # Dropout
             nn.Linear(hidden_dim, num_classes),     # Fully connected layer to map to number of classes
-            nn.Softmax(dim=1)                     # Softmax to output class probabilities # Softmax는 모델 밖에서 하는게 관례적
+            nn.Dropout(0.2),                        # Dropout
+            # nn.Softmax(dim=1)                     # Softmax to output class probabilities # Softmax는 모델 밖에서 하는게 관례적
         )
         self.patches = Patches(patch_size)
 
@@ -91,18 +97,33 @@ class MLPMixer(nn.Module):
         batch_size = spectrograms.size(0)
         
         augmented_spectrograms = self.data_augmentation(spectrograms) # Data augmentation
+        print(f"augmented_spec = {augmented_spectrograms.shape}")
         X = self.patches(augmented_spectrograms) # Extract patches from spectrograms
+        print(f"patches = {X.shape}")
         X = self.projection(X) # Per-patch Fully-connected
+        print(f"projected X = {X.shape}")
 
         # MLP Blocks
         for block in self.mlp_blocks:
             X = block(X)
+        print(f"Blocked X = {X.shape}")
 
         # Global average pooling across patches
         X = X.mean(dim=1)  # (batch_size, hidden_dim)
+        ''' # 대안 1.
+        X_avg = X.mean(dim=1)  # (batch_size, hidden_dim)
+        X_max = X.max(dim=1).values  # Global Max Pooling
+        X = torch.cat([X_avg, X_max], dim=1)  # Concatenate pooled features'''
+        '''# 대안 2.
+        X_avg = X.mean(dim=1, keepdim=True)  # GAP with the same dimension
+        X_max = X.max(dim=1, keepdim=True).values  # Max Pooling with the same dimension
+        X = X + X_avg + X_max  # Combine while keeping dimensions consistent'''
+        print(f"GAP ed X = {X.shape}")
 
         # Classification layer
         out = self.classification_layer(X)
+        print(f"out = {out.shape}")
+
         # print(f"MLP Mixer forward time: {(time.perf_counter() - st):.3f}")
         return out
 
@@ -110,8 +131,8 @@ class MLPMixer(nn.Module):
 # Model test for spectrogram
 if __name__ == "__main__":
     patch_size = 16
-    freq_bins = 128  # number of frequency bins in the spectrogram
-    time_frames = 640  # number of time frames in the spectrogram
+    freq_bins = 128         # number of frequency bins in the spectrogram
+    time_frames = 640       # number of time frames in the spectrogram
     num_patches = (freq_bins // patch_size) * (time_frames // patch_size)  # number of patches
     hidden_dim = 768  # hidden dimension
     token_mixing_dim = 384  # token mixing dimension
