@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torchaudio.transforms as T
+import torch.nn.functional as F
 import pdb
 import time 
 
@@ -95,6 +96,11 @@ class MLPMixer(nn.Module):
     def forward(self, spectrograms):
         st = time.perf_counter()
         batch_size = spectrograms.size(0)
+        
+        # Spectrogram Padding
+        h_pad = (16 - spectrograms.shape[1] % 16) % 16
+        w_pad = (16 - spectrograms.shape[2] % 16) % 16
+        spectrograms = F.pad(spectrograms, (0, w_pad, 0, h_pad), mode='constant', value=0)
         
         augmented_spectrograms = self.data_augmentation(spectrograms) # Data augmentation
         print(f"augmented_spec = {augmented_spectrograms.shape}")

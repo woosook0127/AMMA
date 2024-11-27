@@ -135,13 +135,6 @@ class AudioDataset(torch.utils.data.Dataset):
         spec_tensor = log_mel_spec.unsqueeze(0).float()  # Add batch dimension for consistency
         # print(f"##GET ITEM## convert log mel scale: {(time.perf_counter() - st):.3f}, spec_tensor: {spec_tensor.shape}")
 
-        # Padding
-        st = time.perf_counter()
-        h_pad = (16 - spec_tensor.shape[1] % 16) % 16
-        w_pad = (16 - spec_tensor.shape[2] % 16) % 16
-        spec_tensor = F.pad(spec_tensor, (0, w_pad, 0, h_pad), mode='constant', value=0)
-        # print(f"##GET ITEM## spec padding time: {(time.perf_counter() - st):.3f}")
-
         return spec_tensor, label_tensor
 
 
@@ -229,7 +222,6 @@ if __name__ == "__main__":
     unbalanced_dataset = AudioDataset(unbalanced_metadata, data_folder, label_map, transform)
     eval_dataset = AudioDataset(eval_metadata, data_folder, label_map, transform)
     train_dataset = ConcatDataset([balanced_dataset, unbalanced_dataset])
-
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True, prefetch_factor=2)
     eval_loader = DataLoader(eval_dataset, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True, prefetch_factor=2)
