@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from torch.utils.data import ConcatDataset, DataLoader
 from torchaudio.transforms import MelSpectrogram, AmplitudeToDB
 from MLPMixer_audio import MLPMixer  # MLP-Mixer for Audio model
+from sklearn.metrics import average_precision_score, f1_score
 
 from tqdm import tqdm
 import warnings
@@ -29,6 +30,16 @@ STFT_init = {
     'sr':16000,
     'n_mels': 128
 }
+
+def calculate_metrics(outputs, labels):
+    outputs = torch.sigmoid(outputs).cpu().numpy()  # Sigmoid 적용 후 확률 변환
+    labels = labels.cpu().numpy()
+    
+    mAP = average_precision_score(labels, outputs, average="macro")  # mAP 계산
+    micro_f1 = f1_score(labels, outputs > 0.5, average="micro")
+    macro_f1 = f1_score(labels, outputs > 0.5, average="macro")
+    
+    return {"mAP": mAP, "Micro F1": micro_f1, "Macro F1": macro_f1}
 
 def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
     st = time.perf_counter()
@@ -179,7 +190,7 @@ if __name__ == "__main__":
     writer = SummaryWriter(log_dir)
 
     # Device 설정
-    gpu = "cuda:1"
+    gpu = "cuda:0"
     device = torch.device(gpu if torch.cuda.is_available() else "cpu")
 
     # Load label map
@@ -236,16 +247,30 @@ if __name__ == "__main__":
         num_classes=num_classes,
     ).to(device)
     
-    # 손실 함수 및 옵티마이저
-    # criterion = nn.CrossEntropyLoss()
-    criterion = nn.BCELoss()
+    # 손실 함수 및 옵티마이저 
+    # criterion = nn.CrossEntropyLoss() # For multi-class
+    criterion = nn.BCEWithLogitsLoss() # For multi-label
+    ''' For biased class data '''
+    # class_counts = torch.tensor([metadata.count(c) for c in label_map.keys()])
+    # pos_weight = (1.0 / class_counts).to(device)  # 반비례 가중치
+    # criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     # optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     weight_decay = 0.05
     param_groups = add_weight_decay(model, weight_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=learning_rate, betas=(0.9, 0.95))
     steps_per_epoch = len(train_loader)
     total_steps = steps_per_epoch * epochs
-
+    
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=learning_rate,
+        total_steps=total_steps,
+        epochs=epochs,
+        steps_per_epoch=steps_per_epoch,
+        anneal_strategy="cos",
+        cycle_momentum=False
+    )
+        
     # Step-based training
     step = 0
     with tqdm(total=total_steps, desc="Training MLP Mixer for Audio") as pbar:
@@ -255,6 +280,7 @@ if __name__ == "__main__":
 
             for inputs, labels in train_loader:
                 inputs, labels = inputs.to(device), labels.to(device)
+
                 if torch.isnan(inputs).any() or torch.isinf(inputs).any():
                     continue
                 if torch.isnan(labels).any() or torch.isinf(labels).any():
@@ -264,7 +290,8 @@ if __name__ == "__main__":
                 loss = criterion(outputs, labels)
                 loss.backward()
                 optimizer.step()
-
+                scheduler.step()
+                
                 running_loss += loss.item()
                 step += 1
 
@@ -281,8 +308,6 @@ if __name__ == "__main__":
                     if not os.path.exists(output_dir):
                         os.makedirs(output_dir)
                     torch.save(model.state_dict(), f"{output_dir}/mlp_mixer_epoch_{step:08d}.pth")
-                if step == 10:
-                    torch.save(model.state_dict(), f"../output/mlp_mixer_epoch_{step:08d}.pth")
 
             # Validation at the end of each epoch
             eval_loss = validate(model, eval_loader, criterion, device)
@@ -290,19 +315,5 @@ if __name__ == "__main__":
 
             print(f"Epoch {epoch + 1}/{epochs}, Train Loss: {running_loss / steps_per_epoch:.4f}, Eval Loss: {eval_loss:.4f}")
 
-    '''  # Training Loop
-    for epoch in tqdm(range(epochs), desc="Training MLP Mixer for Audio"):
-        # print(f"Epoch {epoch + 1}/{epochs}")
-        train_loss = train(model, train_loader, criterion, optimizer, device)
-        eval_loss = validate(model, eval_loader, criterion, device)
-        # TensorBoard에 학습 손실 및 검증 손실 기록
-        writer.add_scalar("Loss/Train", train_loss, epoch)
-        writer.add_scalar("Loss/Eval", eval_loss, epoch)
-        
-        print(f"Train Loss: {train_loss:.4f}, Eval Loss: {eval_loss:.4f}")
-        if (epoch % 5 == 0):
-            # Save Model
-            torch.save(model.state_dict(), f"output/mlp_mixer_{epoch:3d}.pth")
-    '''
-    torch.save(model.state_dict(), f"output/mlp_mixer_{epoch:3d}.pth")
+    torch.save(model.state_dict(), f"{output_dir}/mlp_mixer_epoch_{step:08d}.pth")
     print("Training Complete!")
